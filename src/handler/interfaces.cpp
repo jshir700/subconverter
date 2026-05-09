@@ -338,6 +338,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     // If no &ua= URL parameter, fall back to global-ua from config file
     if(argUserAgent.empty() && !global.user_agent.empty())
         argUserAgent = global.user_agent;
+    writeLog(0, "DEBUG [interfaces]: argUserAgent='" + argUserAgent + "', client UA='" + (request.headers.contains("User-Agent") ? request.headers.at("User-Agent") : "(none)") + "'", LOG_LEVEL_INFO);
 
     /// switches with default value
     tribool argUpload = getUrlArg(argument, "upload"), argEmoji = getUrlArg(argument, "emoji"), argAddEmoji = getUrlArg(argument, "add_emoji"), argRemoveEmoji = getUrlArg(argument, "remove_emoji");
