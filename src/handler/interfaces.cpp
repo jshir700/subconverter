@@ -338,7 +338,6 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     // If no &ua= URL parameter, fall back to global-ua from config file
     if(argUserAgent.empty() && !global.user_agent.empty())
         argUserAgent = global.user_agent;
-    writeLog(0, "DEBUG [interfaces]: argUserAgent='" + argUserAgent + "', client UA='" + (request.headers.contains("User-Agent") ? request.headers.at("User-Agent") : "(none)") + "'", LOG_LEVEL_INFO);
 
     /// switches with default value
     tribool argUpload = getUrlArg(argument, "upload"), argEmoji = getUrlArg(argument, "emoji"), argAddEmoji = getUrlArg(argument, "add_emoji"), argRemoveEmoji = getUrlArg(argument, "remove_emoji");
@@ -405,6 +404,10 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     template_args tpl_args;
     tpl_args.global_vars = global.templateVars;
     tpl_args.request_params = req_arg_map;
+    // Inject resolved User-Agent into template context as {{ global.ua }}
+    // This allows &ua= to override the config's default global-ua in templates
+    if(!argUserAgent.empty())
+        tpl_args.global_vars["ua"] = argUserAgent;
 
     /// check for proxy settings
     std::string proxy = parseProxy(global.proxySubscription);
@@ -1568,6 +1571,12 @@ std::string renderTemplate(RESPONSE_CALLBACK_ARGS)
         req_arg_map[x.first] = x.second;
     }
     tpl_args.request_params = req_arg_map;
+    // Inject &ua= parameter into template context as {{ global.ua }}
+    std::string tpl_ua = getUrlArg(argument, "ua");
+    if(tpl_ua.empty() && !global.user_agent.empty())
+        tpl_ua = global.user_agent;
+    if(!tpl_ua.empty())
+        tpl_args.global_vars["ua"] = tpl_ua;
 
     std::string output_content;
     if(render_template(template_content, tpl_args, output_content, global.templatePath) != 0)

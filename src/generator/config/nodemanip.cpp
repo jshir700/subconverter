@@ -153,8 +153,6 @@ int addNodes(std::string link, std::vector<Proxy> &allNodes, int groupID, parse_
         if(parse_set.custom_user_agent && !parse_set.custom_user_agent->empty())
             custom_headers["User-Agent"] = *parse_set.custom_user_agent;
 
-        writeLog(0, "DEBUG [nodemanip]: fetching URL='" + link + "', UA='" + (custom_headers.contains("User-Agent") ? custom_headers.at("User-Agent") : "(using curl default)") + "', custom_user_agent ptr=" + (parse_set.custom_user_agent ? "'" + *parse_set.custom_user_agent + "'" : "nullptr"), LOG_LEVEL_INFO);
-
         // Always pass &custom_headers (never nullptr) so webget.cpp can detect
         // missing User-Agent and fall back to built-in UA via CURLOPT_USERAGENT
         strSub = webGet(link, proxy, global.cacheSubscription, &extra_headers, &custom_headers, fetch_timeout);

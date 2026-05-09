@@ -337,20 +337,6 @@ std::string webGet(const std::string &url, const std::string &proxy, unsigned in
 
     if (startsWith(url, "data:"))
         return dataGet(url);
-    // debug: log the User-Agent that will be sent
-    if(request_headers)
-    {
-        if(request_headers->contains("User-Agent"))
-            writeLog(0, "DEBUG [webget]: request_headers has UA='" + request_headers->at("User-Agent") + "' for url='" + url + "'", LOG_LEVEL_INFO);
-        else
-            writeLog(0, "DEBUG [webget]: request_headers has NO User-Agent, will use curl default for url='" + url + "'", LOG_LEVEL_INFO);
-    }
-    else
-        writeLog(0, "DEBUG [webget]: request_headers is nullptr, will use curl default for url='" + url + "'", LOG_LEVEL_INFO);
-
-    const std::string url_md5_debug = build_cache_key(url, proxy, request_headers);
-    writeLog(0, "DEBUG [webget]: cache_key(md5)=" + url_md5_debug + " for url='" + url + "'", LOG_LEVEL_INFO);
-
     // cache system
     if(cache_ttl > 0)
     {
