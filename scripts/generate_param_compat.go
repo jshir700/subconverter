@@ -44,7 +44,7 @@ func main() {
 	var mihomoPath string
 	for _, line := range strings.Split(string(goModBytes), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.Contains(line, "tindy2013/mihomo") {
+		if strings.Contains(line, "tindy2013/mihomo") || strings.Contains(line, "metacubex/mihomo") {
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				modulePath := parts[0]

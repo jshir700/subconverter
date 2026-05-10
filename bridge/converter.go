@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/tindy2013/mihomo/common/convert"
+	"github.com/metacubex/mihomo/common/convert"
 )
 
 // preprocessSubscription fixes URL encoding issues in subscription links
