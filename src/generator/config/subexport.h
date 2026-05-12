@@ -56,6 +56,7 @@ struct extra_settings
     std::string clash_proxies_style = "flow";
     std::string clash_proxy_groups_style = "flow";
     bool use_proxy_provider = true;
+    bool dedup = true;
     std::vector<ProxyProvider> providers;
     bool authorized = false;
 
