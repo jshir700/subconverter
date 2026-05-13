@@ -2,6 +2,7 @@
 #include <string>
 #include <mutex>
 #include <numeric>
+#include <chrono>
 
 #include <yaml-cpp/yaml.h>
 
@@ -240,9 +241,9 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         return 0;
     };
 
-    // Use vector for containment-based dedup; unordered_set only for exact-match
+    // Use ContainmentIndex for O(k) containment-based dedup; unordered_set for exact-match
     std::unordered_set<std::string> seenRulesExact;
-    std::vector<std::string> seenRulesContainment;
+    ContainmentIndex seenRulesContainment;
     lineSize = output_content.size();
     output_content.clear();
     output_content.reserve(lineSize);
@@ -301,7 +302,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -345,7 +346,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -364,7 +365,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -401,7 +402,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -428,7 +429,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                             continue;
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -488,7 +489,7 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
                         // Containment check against previously seen rules
                         if(containmentCheck(key, seenRulesContainment))
                             continue;
-                        seenRulesContainment.emplace_back(key);
+                        seenRulesContainment.add(key);
                     }
                 }
             }
@@ -775,8 +776,19 @@ inline std::string generateProviderHashFromDecodedUrl(const std::string &decoded
     return shortHash;
 }
 
+// Phase-timing helper macro for debugging 504 timeout issues
+#define PHASE_LOG(msg) do { \
+    static auto phase_start = std::chrono::steady_clock::now(); \
+    auto now = std::chrono::steady_clock::now(); \
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count(); \
+    auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - phase_start).count(); \
+    writeLog(0, "[TIMING] t+" + std::to_string(total_ms) + "ms (+" + std::to_string(phase_ms) + "ms) " + msg, LOG_LEVEL_INFO); \
+    phase_start = now; \
+} while(0)
+
 std::string subconverter(RESPONSE_CALLBACK_ARGS)
 {
+    auto start_time = std::chrono::steady_clock::now();
     auto &argument = request.argument;
     int *status_code = &response.status_code;
 
@@ -785,6 +797,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
     int intSurgeVer = !argSurgeVer.empty() ? to_int(argSurgeVer, 3) : 3;
     if(argTarget == "auto")
         matchUserAgent(request.headers["User-Agent"], argTarget, argClashNewField, intSurgeVer);
+
+    PHASE_LOG("Phase 1: Argument parsing complete");
 
     /// don't try to load groups or rulesets when generating simple subscriptions
     bool lSimpleSubscription = false;
@@ -1011,6 +1025,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         }
     }
 
+    PHASE_LOG("Phase 2: refreshRulesets() complete");
+
     if(!argEmoji.is_undef())
     {
         argAddEmoji.set(argEmoji);
@@ -1094,6 +1110,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
         long ft = to_int(argFetchTimeout, 0);
         if(ft > 0) global.fetch_timeout = ft;
     }
+
+    PHASE_LOG("Phase 3: Config/setup complete, before URL parsing");
 
     //start parsing urls
     RegexMatchConfigs stream_temp = safe_get_streams(), time_temp = safe_get_times();
@@ -1270,6 +1288,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             }
         }
 
+        PHASE_LOG("Phase 4a: URL classification complete (inline_subs=" + std::to_string(inline_subs.size()) + ", provider_subs=" + std::to_string(provider_subs.size()) + ", node_urls=" + std::to_string(node_urls.size()) + ")");
+
         // Process inline subscriptions: server-side fetch
         if(!inline_subs.empty()) {
             writeLog(0, "Processing " + std::to_string(inline_subs.size()) + " inlined subscription(s) (server-side fetch).", LOG_LEVEL_INFO);
@@ -1301,6 +1321,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 groupID++;
             }
         }
+
+        PHASE_LOG("Phase 4b: Inline subscription fetch complete");
 
         // Process provider subscriptions: create proxy-provider entries
         if(!provider_subs.empty()) {
@@ -1403,6 +1425,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
             }
         }
 
+        PHASE_LOG("Phase 5: Provider subscriptions processing complete");
+
         if(inline_subs.empty() && provider_subs.empty()) {
             writeLog(0, "No subscription URLs found, disabling proxy-provider mode.", LOG_LEVEL_INFO);
             ext.use_proxy_provider = false;
@@ -1419,6 +1443,7 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
                 }
                 groupID++;
             }
+            PHASE_LOG("Phase 6b: All URL processing complete (nodes=" + std::to_string(nodes.size()) + ", insert_nodes=" + std::to_string(insert_nodes.size()) + ")");
         }
     } else {
         // Non-Clash targets: keep original logic, fully expand nodes
@@ -1539,6 +1564,8 @@ std::string subconverter(RESPONSE_CALLBACK_ARGS)
 
     //std::cerr<<"Generate target: ";
     proxy = parseProxy(global.proxyConfig);
+    PHASE_LOG("Phase 7: Before output generation switch");
+
     switch(hash_(argTarget))
     {
     case "clash"_hash: case "clashr"_hash:

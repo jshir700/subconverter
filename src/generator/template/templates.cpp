@@ -1,4 +1,6 @@
 #include <string>
+#include <mutex>
+#include <shared_mutex>
 #include <map>
 #include <sstream>
 #include <filesystem>
@@ -108,8 +110,25 @@ int render_template(const std::string &content, const template_args &vars, std::
     for(auto &x : vars.local_vars)
         parse_json_pointer(data["local"], x.first, x.second);
 
-    inja::Environment env;
+    // Inja template compilation cache: compiled templates are cached by content hash
+    // to avoid redundant parsing on every render() call.
+    static std::unordered_map<size_t, inja::Template> template_cache;
+    static std::shared_mutex template_cache_mutex;
+    static constexpr size_t TEMPLATE_CACHE_MAX = 256;
 
+    size_t content_hash = std::hash<std::string>{}(content);
+    inja::Template compiled_template;
+    bool is_cached = false;
+    {
+        std::shared_lock lock(template_cache_mutex);
+        auto it = template_cache.find(content_hash);
+        if (it != template_cache.end()) {
+            compiled_template = it->second;
+            is_cached = true;
+        }
+    }
+
+    inja::Environment env;
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
     env.set_line_statement("#~#");
@@ -245,7 +264,20 @@ int render_template(const std::string &content, const template_args &vars, std::
     try
     {
         std::stringstream out;
-        env.render_to(out, env.parse(content), data);
+        if (is_cached) {
+            // Use cached compiled template — avoids Inja's parse() cost
+            env.render_to(out, compiled_template, data);
+        } else {
+            auto parsed = env.parse(content);
+            // Cache the compiled template under write lock (populate on miss)
+            {
+                std::unique_lock lock(template_cache_mutex);
+                if (template_cache.size() >= TEMPLATE_CACHE_MAX)
+                    template_cache.clear();
+                template_cache[content_hash] = parsed;
+            }
+            env.render_to(out, parsed, data);
+        }
         output = out.str();
         return 0;
     }

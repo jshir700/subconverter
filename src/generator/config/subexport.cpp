@@ -231,6 +231,307 @@ void groupGenerate(const std::string &rule, std::vector<Proxy> &nodelist, string
     }
 }
 
+// Emits a single proxy node as YAML string using YAML::Emitter to avoid
+// per-field YAML::Node allocations. Returns the emitted YAML string.
+// Falls back to YAML::Node-based emission for complex nested structures.
+static void emitProxyToEmitter(YAML::Emitter &out, Proxy &x, extra_settings &ext,
+                                tribool &udp, tribool &tfo, tribool &scv,
+                                bool proxy_block, bool clashR)
+{
+    out << YAML::Flow;
+    if (proxy_block)
+        out << YAML::Block;
+    out << YAML::BeginMap;
+    out << YAML::Key << "name" << YAML::Value << x.Remark;
+    out << YAML::Key << "server" << YAML::Value << x.Hostname;
+    out << YAML::Key << "port" << YAML::Value << x.Port;
+
+    // ========== Generic RawParams Pass-Through (from Mihomo parser) ==========
+    if (!x.RawParams.empty()) {
+        std::string protocol = x.RawParams.count("type") ? x.RawParams["type"] : "";
+        for (const auto &[key, value] : x.RawParams) {
+            if (key == "name" || key == "server" || key == "port")
+                continue;
+            if (!value.empty() && (value[0] == '{' || value[0] == '[')) {
+                // JSON values need YAML::Node parsing for correct emission
+                try {
+                    YAML::Node parsed = YAML::Load(value);
+                    out << YAML::Key << key << YAML::Value << parsed;
+                } catch (...) {
+                    out << YAML::Key << key << YAML::Value << value;
+                }
+            } else {
+                out << YAML::Key << key << YAML::Value << value;
+            }
+        }
+        if (!udp.is_undef() && mihomo::isParamSupported(protocol, "udp") &&
+            !mihomo::isParamHardcoded(protocol, "udp"))
+            out << YAML::Key << "udp" << YAML::Value << udp.get();
+        if (!scv.is_undef() && mihomo::isParamSupported(protocol, "skip-cert-verify") &&
+            !mihomo::isParamHardcoded(protocol, "skip-cert-verify"))
+            out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        if (!tfo.is_undef() && mihomo::isParamSupported(protocol, "tfo") &&
+            !mihomo::isParamHardcoded(protocol, "tfo"))
+            out << YAML::Key << "tfo" << YAML::Value << tfo.get();
+        out << YAML::EndMap;
+        return;
+    }
+
+    switch(x.Type)
+    {
+    case ProxyType::Shadowsocks: {
+        out << YAML::Key << "type" << YAML::Value << "ss";
+        out << YAML::Key << "cipher" << YAML::Value << x.EncryptMethod;
+        out << YAML::Key << "password" << YAML::Value << x.Password;
+        switch(hash_(x.Plugin))
+        {
+        case "simple-obfs"_hash:
+        case "obfs-local"_hash:
+            out << YAML::Key << "plugin" << YAML::Value << "obfs";
+            out << YAML::Key << "plugin-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "mode" << YAML::Value << urlDecode(getUrlArg(replaceAllDistinct(x.PluginOption, ";", "&"), "obfs"))
+                << YAML::Key << "host" << YAML::Value << urlDecode(getUrlArg(replaceAllDistinct(x.PluginOption, ";", "&"), "obfs-host"))
+                << YAML::EndMap;
+            break;
+        case "v2ray-plugin"_hash: {
+            std::string pluginopts = replaceAllDistinct(x.PluginOption, ";", "&");
+            out << YAML::Key << "plugin" << YAML::Value << "v2ray-plugin";
+            out << YAML::Key << "plugin-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "mode" << YAML::Value << getUrlArg(pluginopts, "mode")
+                << YAML::Key << "host" << YAML::Value << getUrlArg(pluginopts, "host")
+                << YAML::Key << "path" << YAML::Value << getUrlArg(pluginopts, "path")
+                << YAML::Key << "tls" << YAML::Value << (pluginopts.find("tls") != std::string::npos)
+                << YAML::Key << "mux" << YAML::Value << (pluginopts.find("mux") != std::string::npos);
+            if(!scv.is_undef())
+                out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+            out << YAML::EndMap;
+            break;
+        }
+        }
+        break;
+    }
+    case ProxyType::VMess: {
+        out << YAML::Key << "type" << YAML::Value << "vmess"
+            << YAML::Key << "uuid" << YAML::Value << x.UserId
+            << YAML::Key << "alterId" << YAML::Value << x.AlterId
+            << YAML::Key << "cipher" << YAML::Value << x.EncryptMethod
+            << YAML::Key << "tls" << YAML::Value << x.TLSSecure;
+        if(!scv.is_undef())
+            out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        if(!x.ServerName.empty())
+            out << YAML::Key << "servername" << YAML::Value << x.ServerName;
+        switch(hash_(x.TransferProtocol))
+        {
+        case "tcp"_hash:
+            break;
+        case "ws"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol;
+            if(ext.clash_new_field_name)
+            {
+                out << YAML::Key << "ws-opts" << YAML::Value << YAML::BeginMap
+                    << YAML::Key << "path" << YAML::Value << x.Path;
+                if(!x.Host.empty())
+                    out << YAML::Key << "headers" << YAML::Value << YAML::BeginMap
+                        << YAML::Key << "Host" << YAML::Value << x.Host;
+                if(!x.Edge.empty())
+                    out << YAML::Key << "Edge" << YAML::Value << x.Edge;
+                if(!x.Host.empty() || !x.Edge.empty())
+                    out << YAML::EndMap;
+                out << YAML::EndMap;
+            }
+            else
+            {
+                out << YAML::Key << "ws-path" << YAML::Value << x.Path;
+                if(!x.Host.empty())
+                    out << YAML::Key << "ws-headers" << YAML::Value << YAML::BeginMap
+                        << YAML::Key << "Host" << YAML::Value << x.Host << YAML::EndMap;
+                if(!x.Edge.empty())
+                    out << YAML::Key << "ws-headers" << YAML::Value << YAML::BeginMap
+                        << YAML::Key << "Edge" << YAML::Value << x.Edge << YAML::EndMap;
+            }
+            break;
+        case "http"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol
+                << YAML::Key << "http-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "method" << YAML::Value << "GET"
+                << YAML::Key << "path" << YAML::Value << YAML::BeginSeq << x.Path << YAML::EndSeq;
+            if(!x.Host.empty())
+                out << YAML::Key << "headers" << YAML::Value << YAML::BeginMap
+                    << YAML::Key << "Host" << YAML::Value << YAML::BeginSeq << x.Host << YAML::EndSeq
+                    << YAML::EndMap;
+            if(!x.Edge.empty())
+                out << YAML::Key << "headers" << YAML::Value << YAML::BeginMap
+                    << YAML::Key << "Edge" << YAML::Value << YAML::BeginSeq << x.Edge << YAML::EndSeq
+                    << YAML::EndMap;
+            out << YAML::EndMap;
+            break;
+        case "h2"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol
+                << YAML::Key << "h2-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "path" << YAML::Value << x.Path;
+            if(!x.Host.empty())
+                out << YAML::Key << "host" << YAML::Value << YAML::BeginSeq << x.Host << YAML::EndSeq;
+            out << YAML::EndMap;
+            break;
+        case "grpc"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol
+                << YAML::Key << "servername" << YAML::Value << x.Host
+                << YAML::Key << "grpc-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "grpc-service-name" << YAML::Value << x.Path
+                << YAML::EndMap;
+            break;
+        default:
+            out << YAML::EndMap;
+            return;
+        }
+        break;
+    }
+    case ProxyType::ShadowsocksR: {
+        out << YAML::Key << "type" << YAML::Value << "ssr"
+            << YAML::Key << "cipher" << YAML::Value << (x.EncryptMethod == "none" ? "dummy" : x.EncryptMethod)
+            << YAML::Key << "password" << YAML::Value << x.Password
+            << YAML::Key << "protocol" << YAML::Value << x.Protocol
+            << YAML::Key << "obfs" << YAML::Value << x.OBFS;
+        if(clashR) {
+            out << YAML::Key << "protocolparam" << YAML::Value << x.ProtocolParam
+                << YAML::Key << "obfsparam" << YAML::Value << x.OBFSParam;
+        } else {
+            out << YAML::Key << "protocol-param" << YAML::Value << x.ProtocolParam
+                << YAML::Key << "obfs-param" << YAML::Value << x.OBFSParam;
+        }
+        break;
+    }
+    case ProxyType::SOCKS5:
+        out << YAML::Key << "type" << YAML::Value << "socks5";
+        if(!x.Username.empty())
+            out << YAML::Key << "username" << YAML::Value << x.Username;
+        if(!x.Password.empty())
+            out << YAML::Key << "password" << YAML::Value << x.Password;
+        if(!scv.is_undef())
+            out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        break;
+    case ProxyType::HTTP:
+    case ProxyType::HTTPS:
+        out << YAML::Key << "type" << YAML::Value << "http";
+        if(!x.Username.empty())
+            out << YAML::Key << "username" << YAML::Value << x.Username;
+        if(!x.Password.empty())
+            out << YAML::Key << "password" << YAML::Value << x.Password;
+        out << YAML::Key << "tls" << YAML::Value << x.TLSSecure;
+        if(!scv.is_undef())
+            out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        break;
+    case ProxyType::Trojan:
+        out << YAML::Key << "type" << YAML::Value << "trojan"
+            << YAML::Key << "password" << YAML::Value << x.Password;
+        if(!x.Host.empty())
+            out << YAML::Key << "sni" << YAML::Value << x.Host;
+        if(!scv.is_undef())
+            out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        switch(hash_(x.TransferProtocol))
+        {
+        case "grpc"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol
+                << YAML::Key << "grpc-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "grpc-service-name" << YAML::Value << x.Path
+                << YAML::EndMap;
+            break;
+        case "ws"_hash:
+            out << YAML::Key << "network" << YAML::Value << x.TransferProtocol
+                << YAML::Key << "ws-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "path" << YAML::Value << x.Path;
+            if(!x.Host.empty())
+                out << YAML::Key << "headers" << YAML::Value << YAML::BeginMap
+                    << YAML::Key << "Host" << YAML::Value << x.Host << YAML::EndMap;
+            out << YAML::EndMap;
+            break;
+        default:
+            break;
+        }
+        break;
+    case ProxyType::Snell:
+        out << YAML::Key << "type" << YAML::Value << "snell"
+            << YAML::Key << "psk" << YAML::Value << x.Password;
+        if(x.SnellVersion != 0)
+            out << YAML::Key << "version" << YAML::Value << x.SnellVersion;
+        if(!x.OBFS.empty())
+        {
+            out << YAML::Key << "obfs-opts" << YAML::Value << YAML::BeginMap
+                << YAML::Key << "mode" << YAML::Value << x.OBFS;
+            if(!x.Host.empty())
+                out << YAML::Key << "host" << YAML::Value << x.Host;
+            out << YAML::EndMap;
+        }
+        break;
+    case ProxyType::WireGuard:
+        out << YAML::Key << "type" << YAML::Value << "wireguard"
+            << YAML::Key << "public-key" << YAML::Value << x.PublicKey
+            << YAML::Key << "private-key" << YAML::Value << x.PrivateKey
+            << YAML::Key << "ip" << YAML::Value << x.SelfIP;
+        if(!x.SelfIPv6.empty())
+            out << YAML::Key << "ipv6" << YAML::Value << x.SelfIPv6;
+        if(!x.PreSharedKey.empty())
+            out << YAML::Key << "preshared-key" << YAML::Value << x.PreSharedKey;
+        if(!x.DnsServers.empty())
+            out << YAML::Key << "dns" << YAML::Value << x.DnsServers;
+        if(x.Mtu > 0)
+            out << YAML::Key << "mtu" << YAML::Value << x.Mtu;
+        break;
+    case ProxyType::Hysteria:
+        out << YAML::Key << "type" << YAML::Value << "hysteria";
+        if (!x.Ports.empty()) out << YAML::Key << "ports" << YAML::Value << x.Ports;
+        if (!x.Protocol.empty()) out << YAML::Key << "protocol" << YAML::Value << x.Protocol;
+        if (!x.OBFSParam.empty()) out << YAML::Key << "obfs-protocol" << YAML::Value << x.OBFSParam;
+        if (!x.Up.empty()) out << YAML::Key << "up" << YAML::Value << x.Up;
+        if (x.UpSpeed) out << YAML::Key << "up-speed" << YAML::Value << x.UpSpeed;
+        if (!x.Down.empty()) out << YAML::Key << "down" << YAML::Value << x.Down;
+        if (x.DownSpeed) out << YAML::Key << "down-speed" << YAML::Value << x.DownSpeed;
+        if (!x.AuthStr.empty()) {
+            out << YAML::Key << "auth-str" << YAML::Value << x.AuthStr
+                << YAML::Key << "auth" << YAML::Value << base64Encode(x.AuthStr);
+        }
+        if (!x.OBFS.empty()) out << YAML::Key << "obfs" << YAML::Value << x.OBFS;
+        if (!x.SNI.empty()) out << YAML::Key << "sni" << YAML::Value << x.SNI;
+        if (!scv.is_undef()) out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        if (!x.Fingerprint.empty()) out << YAML::Key << "fingerprint" << YAML::Value << x.Fingerprint;
+        if (!x.Alpn.empty()) out << YAML::Key << "alpn" << YAML::Value << x.Alpn;
+        if (!x.Ca.empty()) out << YAML::Key << "ca" << YAML::Value << x.Ca;
+        if (!x.CaStr.empty()) out << YAML::Key << "ca-str" << YAML::Value << x.CaStr;
+        if (x.RecvWindowConn) out << YAML::Key << "recv-window-conn" << YAML::Value << x.RecvWindowConn;
+        if (x.RecvWindow) out << YAML::Key << "recv-window" << YAML::Value << x.RecvWindow;
+        if (!x.DisableMtuDiscovery.is_undef()) out << YAML::Key << "disable-mtu-discovery" << YAML::Value << x.DisableMtuDiscovery.get();
+        if (!x.TCPFastOpen.is_undef()) out << YAML::Key << "fast-open" << YAML::Value << x.TCPFastOpen.get();
+        if (x.HopInterval) out << YAML::Key << "hop-interval" << YAML::Value << x.HopInterval;
+        break;
+    case ProxyType::Hysteria2:
+        out << YAML::Key << "type" << YAML::Value << "hysteria2";
+        if (!x.Ports.empty()) out << YAML::Key << "ports" << YAML::Value << x.Ports;
+        if (!x.Up.empty()) out << YAML::Key << "up" << YAML::Value << x.UpSpeed;
+        if (!x.Down.empty()) out << YAML::Key << "down" << YAML::Value << x.DownSpeed;
+        if (!x.Password.empty()) out << YAML::Key << "password" << YAML::Value << x.Password;
+        if (!x.OBFS.empty()) out << YAML::Key << "obfs" << YAML::Value << x.OBFS;
+        if (!x.OBFSParam.empty()) out << YAML::Key << "obfs-password" << YAML::Value << x.OBFSParam;
+        if (!x.SNI.empty()) out << YAML::Key << "sni" << YAML::Value << x.SNI;
+        if (!scv.is_undef()) out << YAML::Key << "skip-cert-verify" << YAML::Value << scv.get();
+        if (!x.Alpn.empty()) out << YAML::Key << "alpn" << YAML::Value << x.Alpn;
+        if (!x.Ca.empty()) out << YAML::Key << "ca" << YAML::Value << x.Ca;
+        if (!x.CaStr.empty()) out << YAML::Key << "ca-str" << YAML::Value << x.CaStr;
+        if (x.CWND) out << YAML::Key << "cwnd" << YAML::Value << x.CWND;
+        if (x.HopInterval) out << YAML::Key << "hop-interval" << YAML::Value << x.HopInterval;
+        break;
+    default:
+        out << YAML::EndMap;
+        return;
+    }
+
+    if(udp && x.Type != ProxyType::Snell)
+        out << YAML::Key << "udp" << YAML::Value << true;
+    if(!tfo.is_undef())
+        out << YAML::Key << "tfo" << YAML::Value << tfo.get();
+
+    out << YAML::EndMap;
+}
+
 void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGroupConfigs &extra_proxy_group, bool clashR, extra_settings &ext)
 {
     YAML::Node proxies, original_groups;
@@ -263,12 +564,15 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
             break;
     }
 
+    // Use YAML::Emitter for direct string emission of proxy nodes, avoiding
+    // per-field YAML::Node allocations that cause significant heap pressure.
+    // Then convert the emitted string back to a YAML sequence node.
+    YAML::Emitter proxy_out;
+    proxy_out << YAML::BeginSeq;
+
     for(Proxy &x : nodes)
     {
-        YAML::Node singleproxy;
-
         std::string type = getProxyTypeName(x.Type);
-        std::string pluginopts = replaceAllDistinct(x.PluginOption, ";", "&");
         if(ext.append_proxy_type)
             x.Remark = "[" + type + "] " + x.Remark;
 
@@ -279,356 +583,33 @@ void proxyToClash(std::vector<Proxy> &nodes, YAML::Node &yamlnode, const ProxyGr
         tfo.define(x.TCPFastOpen);
         scv.define(x.AllowInsecure);
 
-        singleproxy["name"] = x.Remark;
-        singleproxy["server"] = x.Hostname;
-        singleproxy["port"] = x.Port;
-
-        // ========== Generic RawParams Pass-Through (from Mihomo parser) ==========
-        // If RawParams are present, use them directly for full protocol compatibility.
-        if (!x.RawParams.empty()) {
-            // Get protocol type for compatibility check
-            std::string protocol = x.RawParams.count("type") ? x.RawParams["type"] : "";
-
-            // Output all RawParams
-            for (const auto &[key, value] : x.RawParams) {
-                // Skip fields we already handled
-                if (key == "name" || key == "server" || key == "port")
-                    continue;
-
-                // Check if value is a JSON string (starts with { or [)
-                if (!value.empty() && (value[0] == '{' || value[0] == '[')) {
-                    try {
-                        YAML::Node parsed = YAML::Load(value);
-                        singleproxy[key] = parsed;
-                    } catch (...) {
-                        singleproxy[key] = value;
-                    }
-                } else {
-                    singleproxy[key] = value;
-                }
-            }
-
-            // Smart Global Parameter Application with Hardcode Protection
-            if (!udp.is_undef()) {
-                if (mihomo::isParamSupported(protocol, "udp") &&
-                    !mihomo::isParamHardcoded(protocol, "udp")) {
-                    singleproxy["udp"] = udp.get();
-                }
-            }
-            if (!scv.is_undef()) {
-                if (mihomo::isParamSupported(protocol, "skip-cert-verify") &&
-                    !mihomo::isParamHardcoded(protocol, "skip-cert-verify")) {
-                    singleproxy["skip-cert-verify"] = scv.get();
-                }
-            }
-            if (!tfo.is_undef()) {
-                if (mihomo::isParamSupported(protocol, "tfo") &&
-                    !mihomo::isParamHardcoded(protocol, "tfo")) {
-                    singleproxy["tfo"] = tfo.get();
-                }
-            }
-
-            singleproxy.SetStyle(YAML::EmitterStyle::Flow);
-            proxies.push_back(singleproxy);
-            nodelist.emplace_back(x);
-
-            continue;
+        // Skip deprecated SSR ciphers
+        if (x.Type == ProxyType::ShadowsocksR && ext.filter_deprecated) {
+            if(!clashR && std::find(clash_ssr_ciphers.cbegin(), clash_ssr_ciphers.cend(), x.EncryptMethod) == clash_ssr_ciphers.cend())
+                continue;
+            if(std::find(clashr_protocols.cbegin(), clashr_protocols.cend(), x.Protocol) == clashr_protocols.cend())
+                continue;
+            if(std::find(clashr_obfs.cbegin(), clashr_obfs.cend(), x.OBFS) == clashr_obfs.cend())
+                continue;
         }
-
-        switch(x.Type)
-        {
-        case ProxyType::Shadowsocks:
-            //latest clash core removed support for chacha20 encryption
-            if(ext.filter_deprecated && x.EncryptMethod == "chacha20")
-                continue;
-            singleproxy["type"] = "ss";
-            singleproxy["cipher"] = x.EncryptMethod;
-            singleproxy["password"] = x.Password;
-            if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit) && !x.Password.empty())
-                singleproxy["password"].SetTag("str");
-            switch(hash_(x.Plugin))
-            {
-            case "simple-obfs"_hash:
-            case "obfs-local"_hash:
-                singleproxy["plugin"] = "obfs";
-                singleproxy["plugin-opts"]["mode"] = urlDecode(getUrlArg(pluginopts, "obfs"));
-                singleproxy["plugin-opts"]["host"] = urlDecode(getUrlArg(pluginopts, "obfs-host"));
-                break;
-            case "v2ray-plugin"_hash:
-                singleproxy["plugin"] = "v2ray-plugin";
-                singleproxy["plugin-opts"]["mode"] = getUrlArg(pluginopts, "mode");
-                singleproxy["plugin-opts"]["host"] = getUrlArg(pluginopts, "host");
-                singleproxy["plugin-opts"]["path"] = getUrlArg(pluginopts, "path");
-                singleproxy["plugin-opts"]["tls"] = pluginopts.find("tls") != std::string::npos;
-                singleproxy["plugin-opts"]["mux"] = pluginopts.find("mux") != std::string::npos;
-                if(!scv.is_undef())
-                    singleproxy["plugin-opts"]["skip-cert-verify"] = scv.get();
-                break;
-            }
-            break;
-        case ProxyType::VMess:
-            singleproxy["type"] = "vmess";
-            singleproxy["uuid"] = x.UserId;
-            singleproxy["alterId"] = x.AlterId;
-            singleproxy["cipher"] = x.EncryptMethod;
-            singleproxy["tls"] = x.TLSSecure;
-            if(!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            if(!x.ServerName.empty())
-                singleproxy["servername"] = x.ServerName;
-            switch(hash_(x.TransferProtocol))
-            {
-            case "tcp"_hash:
-                break;
-            case "ws"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                if(ext.clash_new_field_name)
-                {
-                    singleproxy["ws-opts"]["path"] = x.Path;
-                    if(!x.Host.empty())
-                        singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
-                    if(!x.Edge.empty())
-                        singleproxy["ws-opts"]["headers"]["Edge"] = x.Edge;
-                }
-                else
-                {
-                    singleproxy["ws-path"] = x.Path;
-                    if(!x.Host.empty())
-                        singleproxy["ws-headers"]["Host"] = x.Host;
-                    if(!x.Edge.empty())
-                        singleproxy["ws-headers"]["Edge"] = x.Edge;
-                }
-                break;
-            case "http"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                singleproxy["http-opts"]["method"] = "GET";
-                singleproxy["http-opts"]["path"].push_back(x.Path);
-                if(!x.Host.empty())
-                    singleproxy["http-opts"]["headers"]["Host"].push_back(x.Host);
-                if(!x.Edge.empty())
-                    singleproxy["http-opts"]["headers"]["Edge"].push_back(x.Edge);
-                break;
-            case "h2"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                singleproxy["h2-opts"]["path"] = x.Path;
-                if(!x.Host.empty())
-                    singleproxy["h2-opts"]["host"].push_back(x.Host);
-                break;
-            case "grpc"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                singleproxy["servername"] = x.Host;
-                singleproxy["grpc-opts"]["grpc-service-name"] = x.Path;
-                break;
-            default:
-                continue;
-            }
-            break;
-        case ProxyType::ShadowsocksR:
-            //ignoring all nodes with unsupported obfs, protocols and encryption
-            if(ext.filter_deprecated)
-            {
-                if(!clashR && std::find(clash_ssr_ciphers.cbegin(), clash_ssr_ciphers.cend(), x.EncryptMethod) == clash_ssr_ciphers.cend())
-                    continue;
-                if(std::find(clashr_protocols.cbegin(), clashr_protocols.cend(), x.Protocol) == clashr_protocols.cend())
-                    continue;
-                if(std::find(clashr_obfs.cbegin(), clashr_obfs.cend(), x.OBFS) == clashr_obfs.cend())
-                    continue;
-            }
-
-            singleproxy["type"] = "ssr";
-            singleproxy["cipher"] = x.EncryptMethod == "none" ? "dummy" : x.EncryptMethod;
-            singleproxy["password"] = x.Password;
-            if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit) && !x.Password.empty())
-                singleproxy["password"].SetTag("str");
-            singleproxy["protocol"] = x.Protocol;
-            singleproxy["obfs"] = x.OBFS;
-            if(clashR)
-            {
-                singleproxy["protocolparam"] = x.ProtocolParam;
-                singleproxy["obfsparam"] = x.OBFSParam;
-            }
-            else
-            {
-                singleproxy["protocol-param"] = x.ProtocolParam;
-                singleproxy["obfs-param"] = x.OBFSParam;
-            }
-            break;
-        case ProxyType::SOCKS5:
-            singleproxy["type"] = "socks5";
-            if(!x.Username.empty())
-                singleproxy["username"] = x.Username;
-            if(!x.Password.empty())
-            {
-                singleproxy["password"] = x.Password;
-                if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit))
-                    singleproxy["password"].SetTag("str");
-            }
-            if(!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            break;
-        case ProxyType::HTTP:
-        case ProxyType::HTTPS:
-            singleproxy["type"] = "http";
-            if(!x.Username.empty())
-                singleproxy["username"] = x.Username;
-            if(!x.Password.empty())
-            {
-                singleproxy["password"] = x.Password;
-                if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit))
-                    singleproxy["password"].SetTag("str");
-            }
-            singleproxy["tls"] = x.TLSSecure;
-            if(!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            break;
-        case ProxyType::Trojan:
-            singleproxy["type"] = "trojan";
-            singleproxy["password"] = x.Password;
-            if(!x.Host.empty())
-                singleproxy["sni"] = x.Host;
-            if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit) && !x.Password.empty())
-                singleproxy["password"].SetTag("str");
-            if(!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            switch(hash_(x.TransferProtocol))
-            {
-            case "tcp"_hash:
-                break;
-            case "grpc"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                if(!x.Path.empty())
-                    singleproxy["grpc-opts"]["grpc-service-name"] = x.Path;
-                break;
-            case "ws"_hash:
-                singleproxy["network"] = x.TransferProtocol;
-                singleproxy["ws-opts"]["path"] = x.Path;
-                if(!x.Host.empty())
-                    singleproxy["ws-opts"]["headers"]["Host"] = x.Host;
-                break;
-            }
-            break;
-        case ProxyType::Snell:
-            if (x.SnellVersion >= 4)
-                continue;
-            singleproxy["type"] = "snell";
-            singleproxy["psk"] = x.Password;
-            if(x.SnellVersion != 0)
-                singleproxy["version"] = x.SnellVersion;
-            if(!x.OBFS.empty())
-            {
-                singleproxy["obfs-opts"]["mode"] = x.OBFS;
-                if(!x.Host.empty())
-                    singleproxy["obfs-opts"]["host"] = x.Host;
-            }
-            if(std::all_of(x.Password.begin(), x.Password.end(), ::isdigit) && !x.Password.empty())
-                singleproxy["password"].SetTag("str");
-            break;
-        case ProxyType::WireGuard:
-            singleproxy["type"] = "wireguard";
-            singleproxy["public-key"] = x.PublicKey;
-            singleproxy["private-key"] = x.PrivateKey;
-            singleproxy["ip"] = x.SelfIP;
-            if(!x.SelfIPv6.empty())
-                singleproxy["ipv6"] = x.SelfIPv6;
-            if(!x.PreSharedKey.empty())
-                singleproxy["preshared-key"] = x.PreSharedKey;
-            if(!x.DnsServers.empty())
-                singleproxy["dns"] = x.DnsServers;
-            if(x.Mtu > 0)
-                singleproxy["mtu"] = x.Mtu;
-            break;
-        case ProxyType::Hysteria:
-            singleproxy["type"] = "hysteria";
-            if (!x.Ports.empty())
-                singleproxy["ports"] = x.Ports;
-            if (!x.Protocol.empty())
-                singleproxy["protocol"] = x.Protocol;
-            if (!x.OBFSParam.empty())
-                singleproxy["obfs-protocol"] = x.OBFSParam;
-            if (!x.Up.empty())
-                singleproxy["up"] = x.Up;
-            if (x.UpSpeed)
-                singleproxy["up-speed"] = x.UpSpeed;
-            if (!x.Down.empty())
-                singleproxy["down"] = x.Down;
-            if (x.DownSpeed)
-                singleproxy["down-speed"] = x.DownSpeed;
-            if (!x.AuthStr.empty())
-            {
-                singleproxy["auth-str"] = x.AuthStr;
-                singleproxy["auth"] = base64Encode(x.AuthStr);
-            }
-            if (!x.OBFS.empty())
-                singleproxy["obfs"] = x.OBFS;
-            if (!x.SNI.empty())
-                singleproxy["sni"] = x.SNI;
-            if (!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            if (!x.Fingerprint.empty())
-                singleproxy["fingerprint"] = x.Fingerprint;
-            if (!x.Alpn.empty())
-                singleproxy["alpn"] = x.Alpn;
-            if (!x.Ca.empty())
-                singleproxy["ca"] = x.Ca;
-            if (!x.CaStr.empty())
-                singleproxy["ca-str"] = x.CaStr;
-            if (x.RecvWindowConn)
-                singleproxy["recv-window-conn"] = x.RecvWindowConn;
-            if (x.RecvWindow)
-                singleproxy["recv-window"] = x.RecvWindow;
-            if (!x.DisableMtuDiscovery.is_undef())
-                singleproxy["disable-mtu-discovery"] = x.DisableMtuDiscovery.get();
-            if (!x.TCPFastOpen.is_undef())
-                singleproxy["fast-open"] = x.TCPFastOpen.get();
-            if (x.HopInterval)
-                singleproxy["hop-interval"] = x.HopInterval;
-            break;
-        case ProxyType::Hysteria2:
-            singleproxy["type"] = "hysteria2";
-            if (!x.Ports.empty())
-                singleproxy["ports"] = x.Ports;
-            if (!x.Up.empty())
-                singleproxy["up"] = x.UpSpeed;
-            if (!x.Down.empty())
-                singleproxy["down"] = x.DownSpeed;
-            if (!x.Password.empty())
-                singleproxy["password"] = x.Password;
-            if (!x.OBFS.empty())
-                singleproxy["obfs"] = x.OBFS;
-            if (!x.OBFSParam.empty())
-                singleproxy["obfs-password"] = x.OBFSParam;
-            if (!x.SNI.empty())
-                singleproxy["sni"] = x.SNI;
-            if (!scv.is_undef())
-                singleproxy["skip-cert-verify"] = scv.get();
-            if (!x.Alpn.empty())
-                singleproxy["alpn"] = x.Alpn;
-            if (!x.Ca.empty())
-                singleproxy["ca"] = x.Ca;
-            if (!x.CaStr.empty())
-                singleproxy["ca-str"] = x.CaStr;
-            if (x.CWND)
-                singleproxy["cwnd"] = x.CWND;
-            if (x.HopInterval)
-                singleproxy["hop-interval"] = x.HopInterval;
-            break;
-        default:
+        if (x.Type == ProxyType::Shadowsocks && ext.filter_deprecated && x.EncryptMethod == "chacha20")
             continue;
-        }
+        if (x.Type == ProxyType::Snell && x.SnellVersion >= 4)
+            continue;
 
-        // UDP is not supported yet in clash using snell
-        // sees in https://dreamacro.github.io/clash/configuration/outbound.html#snell
-        if(udp && x.Type != ProxyType::Snell)
-            singleproxy["udp"] = true;
-        if(!tfo.is_undef())
-            singleproxy["tfo"] = tfo.get();
-        if(proxy_block)
-            singleproxy.SetStyle(YAML::EmitterStyle::Block);
-        else
-            singleproxy.SetStyle(YAML::EmitterStyle::Flow);
-        proxies.push_back(singleproxy);
+        emitProxyToEmitter(proxy_out, x, ext, udp, tfo, scv, proxy_block, clashR);
         remarks_list.emplace_back(x.Remark);
         nodelist.emplace_back(x);
+    }
+
+    proxy_out << YAML::EndSeq;
+    std::string proxy_str = proxy_out.c_str();
+    if (!proxy_str.empty()) {
+        try {
+            proxies = YAML::Load(proxy_str);
+        } catch (...) {
+            // Fallback: empty sequence
+        }
     }
 
     if(proxy_compact)
