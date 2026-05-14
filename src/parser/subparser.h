@@ -95,7 +95,7 @@ void explodeHysteria2(std::string hysteria2, Proxy &node);
 /// Parse a link
 void explode(const std::string &link, Proxy &node);
 void explodeSSD(std::string link, std::vector<Proxy> &nodes);
-void explodeSub(std::string sub, std::vector<Proxy> &nodes);
+void explodeSub(const std::string &sub, std::vector<Proxy> &nodes);
 int explodeConf(const std::string &filepath, std::vector<Proxy> &nodes);
 int explodeConfContent(const std::string &content, std::vector<Proxy> &nodes);
 

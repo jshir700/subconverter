@@ -2467,8 +2467,9 @@ void explode(const std::string &link, Proxy &node)
         explodeHTTPSub(link, node);
 }
 
-void explodeSub(std::string sub, std::vector<Proxy> &nodes)
+void explodeSub(const std::string &sub_in, std::vector<Proxy> &nodes)
 {
+    std::string sub(sub_in); // Only copy once if normal-sub path is reached
     std::stringstream strstream;
     std::string strLink;
     bool processed = false;
@@ -2517,7 +2518,13 @@ void explodeSub(std::string sub, std::vector<Proxy> &nodes)
                 return;
         }
         strstream << sub;
-        char delimiter = count(sub.begin(), sub.end(), '\n') < 1 ? count(sub.begin(), sub.end(), '\r') < 1 ? ' ' : '\r' : '\n';
+        // Single-pass delimiter detection: scan once for \n and \r simultaneously
+        char delimiter = ' ';
+        for(char c : sub)
+        {
+            if(c == '\n') { delimiter = '\n'; break; }
+            if(c == '\r') { delimiter = '\r'; }
+        }
         while(getline(strstream, strLink, delimiter))
         {
             Proxy node;
